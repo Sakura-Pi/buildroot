@@ -1,0 +1,80 @@
+#!/bin/sh
+#
+# AP6255 Bluetooth initialization via brcm_patchram_plus
+#
+
+BT_REG_ON_GPIO=139    # GPIO4_PB3 = 4*32+11 = 139
+BT_WAKE_GPIO=140      # GPIO4_PB4 = 4*32+12 = 140
+BT_TTY="/dev/ttyS4"
+BT_FW="/lib/firmware/BCM4345C0.hcd"
+PIDFILE="/var/run/brcm_patchram_plus.pid"
+
+bt_power_on() {
+    # Export and configure BT_REG_ON GPIO
+    if [ ! -d /sys/class/gpio/gpio${BT_REG_ON_GPIO} ]; then
+        echo ${BT_REG_ON_GPIO} > /sys/class/gpio/export 2>/dev/null
+    fi
+    echo out > /sys/class/gpio/gpio${BT_REG_ON_GPIO}/direction
+
+    # Toggle BT_REG_ON: off -> on
+    echo 0 > /sys/class/gpio/gpio${BT_REG_ON_GPIO}/value
+    sleep 0.2
+    echo 1 > /sys/class/gpio/gpio${BT_REG_ON_GPIO}/value
+    sleep 0.5
+}
+
+bt_power_off() {
+    if [ -d /sys/class/gpio/gpio${BT_REG_ON_GPIO} ]; then
+        echo 0 > /sys/class/gpio/gpio${BT_REG_ON_GPIO}/value
+    fi
+}
+
+case "$1" in
+  start)
+    printf "Starting Bluetooth (AP6255): "
+
+    if [ ! -f "$BT_FW" ]; then
+        echo "FAIL (firmware not found: $BT_FW)"
+        exit 1
+    fi
+
+    bt_power_on
+
+    brcm_patchram_plus --enable_hci --no2bytes --tosleep 200000 \
+        --baudrate 1500000 --use_baudrate_for_download \
+        --patchram "$BT_FW" "$BT_TTY" &
+    echo $! > "$PIDFILE"
+
+    # Wait for hci0 to appear
+    for i in $(seq 1 20); do
+        if hciconfig hci0 >/dev/null 2>&1; then
+            hciconfig hci0 up
+            echo "OK"
+            exit 0
+        fi
+        sleep 0.5
+    done
+    echo "FAIL (hci0 not found)"
+    ;;
+  stop)
+    printf "Stopping Bluetooth: "
+    if [ -f "$PIDFILE" ]; then
+        kill $(cat "$PIDFILE") 2>/dev/null
+        rm -f "$PIDFILE"
+    fi
+    hciconfig hci0 down 2>/dev/null
+    bt_power_off
+    echo "OK"
+    ;;
+  restart)
+    "$0" stop
+    sleep 1
+    "$0" start
+    ;;
+  *)
+    echo "Usage: $0 {start|stop|restart}"
+    exit 1
+    ;;
+esac
+
+exit 0
